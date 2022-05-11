@@ -1,0 +1,350 @@
+- name: cliche_deploy
+  hosts: "{{ myhosts | default('web') }}"
+#  hosts: rocky85Cliche
+  remote_user: root
+#sudo: True
+
+  gather_facts: False
+
+  vars:
+    vMaster_node:          192.168.10.10
+    vHome_mount:           "{{vMaster_node}}:/home"
+#   vSLURM_master_config:  "{{vMaster_node}}:/etc/slurm/slurm.conf"
+    vSLURM_master_config:  "/etc/slurm/slurm.conf"
+
+    vSLURM_def_path:       /etc/slurm/       
+
+    # In this dirr we should prepare and keep OpehHPC iamges
+    vCHROOT_base :         /opt/ohpc/admin/images/rocky8.5
+
+    vOHPC_release_rocky85: http://repos.openhpc.community/OpenHPC/2/EL_8/x86_64/ohpc-release-2-1.el8.x86_64.rpm
+    vOHPC_release_centos7: http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
+
+    #Full works link look like this: http://dl.fedoraproject.org/pub/epel/8/Everything/$basearch/
+    vEpel_repo_template: 'https://download.example'
+    vEpel_repo_link:     'http://dl.fedoraproject.org'
+#    epel_repo_centos7:  http://dl.fedoraproject.org/pub/epel/7/$basearch
+  
+    vEpelRepoConfig:
+      - /etc/yum.repos.d/epel.repo
+      - /etc/yum.repos.d/epel-modular.repo
+    vOHPCRepoConfig:       /etc/yum.repos.d/OpenHPC.repo
+
+    vInternal_ethIntf:  enp0s8
+    vInternal_ethIP:    192.168.10.5
+
+    vNTP_config_rocky8:  /etc/chrony.conf
+    vNTP_config_Cetnos7: /etc/ntp.conf
+
+    vNTP_service_rocky8_package:  chrony    
+    vNTP_service_Cetnos7_package: ntp
+
+    vNTP_service_rocky8:  chronyd.service
+    vNTP_service_Cetnos7: ntpd.service
+
+    vDHCP_master_config:   /etc/dhcp/dhcpd.conf
+    vDHCP_def_path:        /etc/dhcp/
+ 
+  pre_tasks:
+    - name: Disclamer 
+      ansible.builtin.debug:
+        msg:
+        - "****************************************************************"
+        - "THE SCRIPT DISCLAMER "
+        - "The script purpose is to prepare all needs and install OpenHPC."
+        - "After that you can use this node by OpenHPC."
+        - "Node have shares mounted from master node."
+        - "Each build put initramfs for PXE and image to this share."
+        - "Master node can hand out PXE and system image."
+        - "****************************************************************"
+
+    - name: Deploy ssh key # Can make smarter by checking before copy authorized_keys file but looks more complex for right now
+      copy: 
+        src:  ~/.ssh/ 
+        dest: ~/.ssh
+        mode: preserve
+
+    - name: Add to basrc convinient params. Will add only one times
+      lineinfile:
+        path: ~/.bashrc
+        line: "{{ item }}"
+      with_items:
+          - 'HISTTIMEFORMAT="%d/%m/%y %T "'
+          - 'HISTFILESIZE=1000000 '
+          - 'HISTSIZE=1000000'
+
+  tasks:
+   - name: Base tools deploy
+     ansible.builtin.package:
+      name: 
+         - mc
+         - vim
+         - tmux
+         - net-tools    # ifconfig
+         - dnsmasq      # to DNS debug
+         - bind-utils   # dig and hosts
+         - mlocate      # locate         
+         - tcpdump
+         - python2
+         - python3
+         - wget
+         - curl
+         - chrony       # ntpd for Rocky/Rhel 8 and higher
+         - tftp-server.x86_64 # by default TFTP don't installed on Rocky/Rhel 8 
+      state: latest
+
+   - name: Disable firewall
+     service:
+       name:    firewalld.service
+       state:   stopped
+       enabled: false
+             
+   - name: Disable Selinux. Backup curr config. Just in case
+     shell: cp /etc/sysconfig/selinux /etc/sysconfig/selinux.`date -u +%s`
+
+   - name: Disable Selinux. Cnahge config
+     lineinfile:
+        path: /etc/sysconfig/selinux
+        regexp: "^SELINUX=enforcing"
+        line: "{{ item }}"
+     with_items:
+        - '#SELINUX=enforcing'
+        - 'SELINUX=disabled'   
+
+   - name: Which OS
+     shell: grep PRETTY_NAME /etc/os-release|sed "s/.*=\"//g"
+     register: result
+
+   - name: If it's Rocky based OS. Set variable
+     set_fact: 
+       vOHPC_release="{{ vOHPC_release_rocky85 }}"
+       vNTP_config="{{ vNTP_config_rocky8 }}"
+       vNTP_service="{{ vNTP_service_rocky8 }}"
+       vNTP_service_package="{{ vNTP_service_rocky8_package }}"
+
+     become: yes
+     when: result.stdout.split(' ')[0] == "Rocky"
+
+#   # Epel have problem that brake your yum repository process. 
+#   # To fix it on Centos you need to comment meta in 
+#   # /etc/yum.repos.d/epel.repo and uncomment basedir  
+#   - name: If it's CentOS|Rhel lower when 8
+#     shell: yum install -y http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
+#     become: yes
+#     when: result.stdout.split(' ')[0] == "Centos"
+
+         
+   - name: Prepare to OpenHPC  
+     shell: | 
+       yum install -y dnf-plugins-core
+       yum config-manager --set-enabled powertools
+
+
+     # To check replace seperatelly you can use follow method:
+     #    ansible-playbook -v --extra-vars "myhosts=rocky85Cliche"  clichePrepare.yml --tags "epilBase","epilMeta"
+   - name: Block to handle error with OpenHPC repo and EPIL repo
+     block: 
+       - name: Install OpenHPC repo
+         shell: yum install -y '{{ vOHPC_release }}'
+      
+       - name: Change EPIL. Change baseurl link
+         tags: epilBase 
+         replace:
+#            path: /etc/yum.repos.d/epel.repo
+            path: "{{ item }}"
+
+            regexp:  '#baseurl={{vEpel_repo_template}}'
+            replace: 'baseurl={{ vEpel_repo_link }}'   
+         with_items: "{{ vEpelRepoConfig }}"
+
+       # To check without remove use : --skip-tags epilRemove
+       - name: Change EPIL. Comment metalink
+         tags: epilMeta
+         replace:
+#           path: /etc/yum.repos.d/epel.repo
+            path: "{{ item }}"
+
+            regexp:  '^metalink='
+            replace: '#metalink='
+         with_items: "{{ vEpelRepoConfig }}"
+
+       - name: Install OpenHPC base
+         shell: |
+           yum install -y ohpc-base
+           yum install -y ohpc-warewulf     
+         
+       - name: Make dir for OpenHPC images opt ohpc admin images
+         shell: mkdir -p /opt/ohpc/admin/images/
+
+     rescue:
+       - name: ERROR handler Processing if have problem with EPIL repo install
+         tags: epilRemove
+         shell: |
+           yum remove -y '{{ vOHPC_release }}'
+           yum remove -y epel-release
+
+       - name:
+         ansible.builtin.debug:
+           msg: 'Have a problem near to OpenHPC Base install and OpehHPC with EPIL repos. Uninstall these repos'
+#     always:
+
+
+   - name: Enable Provisioning network interface
+     block:
+       - name: Add correct NTP to etc ntp.conf
+         lineinfile:
+            path: "{{ vNTP_config }}"
+            line: 'server pool.ntp.org'
+
+       - name: Restart NTP
+         tags: ntpRestart
+         service:
+           name:    "{{ vNTP_service }}"
+           state:   restarted
+           enabled: true
+
+       - name: Config eth interface
+         shell: |
+           perl -e "s/device = eth1/device = {{ vInternal_ethIntf }}/" /etc/warewulf/provision.conf
+           ifconfig "{{ vInternal_ethIntf }}" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
+
+
+#   # TFTP don't need becuse the main purpose for this script to prepare image 
+#   # and put it to share. DHCP and TFTP located on another node - master node.
+#
+#   - name: Configure and up TFTP for entos Rhel lower 8 
+#     block: 
+#       - name: If Centos Rhel lower 8 then Up TFTP 
+#         shell: |
+#           perl -pi -e "s/^\s+disable\s+= yes/ disable = no/" /etc/xinetd.d/tftp
+#           perl -pi -e "s/^\s+disable\s+= yes/ disable = no/" /etc/xinetd.d/tftp
+#
+#       - name: If Centos Rhel lower 8 then Restart xinitd 
+#         service:
+#           name:    xinetd.service
+#           state:   restarted
+#           enabled: true          
+#     when: result.stdout.split(' ')[0] == "Centos"
+#
+#   - name: Configure and up TFTP for Centos Rhel Rocky equal or higher 8
+#     block:
+#       - name: If Centos Rhel Rocky equal or higher 8 then Up TFTP
+#         service:
+#           name:    tftp.service
+#           state:   restarted
+#           enabled: true
+#     when: result.stdout.split(' ')[0] == "Rocky"
+
+   - name: Configure mount points 
+     tags: dhcpd_start
+     lineinfile:
+       path: "/etc/fstab"
+       line: "{{ item }}"
+     with_items:
+       - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
+       - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"
+       - "{{ vMaster_node }}:/var/lib/tftpboot/warewulf /var/lib/tftpboot/warewulf *(rw,no_subtree_check,no_root_squash)"
+       - "{{ vMaster_node }}:/opt/ohpc/admin/images     /opt/ohpc/admin/images     *(rw,no_subtree_check,no_root_squash)"
+
+   - name: Mount all from fstab 
+     tags: dhcpd_start
+     shell: mount -a
+
+
+   - name: Configure and up SLURM   
+     block:  
+       - name: Install ohpc slurm server
+         shell: yum install -y ohpc-slurm-server
+       
+       - name: Copy SLURM config from master node
+         copy: 
+            src:  "{{ vSLURM_master_config }}"
+            dest: "{{ vSLURM_def_path }}"
+            mode: preserve
+
+
+   - name: Up MariaDB
+     service:
+       name:    mariadb.service
+       state:   restarted
+       enabled: true
+    
+   - name: Up HTTPd
+     service:
+       name:    httpd.service
+       state:   restarted
+       enabled: true
+
+
+   # ****************************************
+   #  Second part
+   # ****************************************
+   - name: Prepoare first OpenHPC image build
+     block:    
+
+       - name: Init base image
+         shell: |
+           wwinit database
+           wwmkchroot rocky-8 "{{ vCHROOT_base }}"    # Build initial chroot image. NOTICE: rocky-8 is a template name /usr/libexec/warewulf/wwmkchroot/rocky-8.tmpl
+
+       - name: Copy EPEL repos
+         shell: |
+            cp "{{ item }}" "{{vCHROOT_base}}/{{ item }}"
+         with_items: "{{ vEpelRepoConfig }}"
+
+       - name: Copy OpenHPC repo
+         shell: |
+            cp "{{ vOHPCRepoConfig }}" "{{vCHROOT_base}}/{{ vOHPCRepoConfig }}"
+
+       - name: Install base OpenHPC components
+         tags: OpenHPC_image_baseInstall
+         shell: |
+           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-base-compute 
+
+       - name: Install base OpenHPC components
+         shell: |      
+           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-slurm-client
+           yum -y --installroot="{{ vCHROOT_base }}" install "{{ vNTP_service_package}}"
+           yum -y --installroot="{{ vCHROOT_base }}" install kernel 
+           yum -y --installroot="{{ vCHROOT_base }}" install lmod-ohpc
+
+       - name: Image prepare
+         shell: | 
+           wwbootstrap `uname -r`
+           wwvnfs -y --chroot="{{ vCHROOT_base }}"
+
+       - name: Configure mount points in a image
+         lineinfile:
+           path: "{{ vCHROOT_base }}/etc/fstab"
+           line: "{{ item }}"
+         with_items:
+           - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
+           - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"         
+
+       - name:  Copy resolv.conf to a new image
+         shell: cp -p /etc/resolv.conf "{{ vCHROOT_base }}"/etc/resolv.conf
+
+
+       
+   - name: Copy DHCP config from master node
+     tags: dhcpd_start
+     copy: 
+        src:  "{{ vDHCP_master_config }}"
+        dest: "{{ vDHCP_def_path }}"
+        mode: preserve
+
+   - name: Drow attention Cliche usage
+     ansible.builtin.debug:
+       msg:
+         - We don't need to up DHCP and PXE on this cliche node. 
+         - In this node we need just to build image. Not more.
+         - A initramfs and OS built images are placed to NFS mounts.
+         - DHCP and PXE works on the master node and can use that share.
+                     
+   # Make it on the latest stage because we need to configure DHPCP.conf by OpenHPC. So shift it to the last. 
+#   - name: Up DHCPd
+#     tags: dhcpd_start
+#     service:
+#       name:    dhcpd.service
+#       state:   restarted
+#       enabled: true     
