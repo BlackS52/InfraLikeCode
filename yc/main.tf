@@ -1,3 +1,7 @@
+# ***********************************************
+#	Set provider and credentials
+# ***********************************************
+
 terraform {
   required_providers {
     yandex = {
@@ -7,10 +11,9 @@ terraform {
   required_version = ">= 0.13"
 }
 
-# How work with this: 
+# How to work with this: 
 #	terraform plan -var-file=cred.tfvar | terraform aplly -var-file=cred.tfvar | terraform destroy -var-file=cred.tfvar
 provider "yandex" {
-#	 source = "./cred.tf"
 	 token 		= var.token
 	 cloud_id 	= var.cloud_id
 	 folder_id 	= var.folder_id
@@ -39,10 +42,6 @@ resource "yandex_compute_instance" "vm-1" {
 	platform_id = "standard-v2"
 #	status		= stop
 
-#	scheduling_policy {
-#   	preemptible = (known after apply)
-#   }
-
 	resources {
 		core_fraction = 20
    	cores  = 2   
@@ -62,32 +61,34 @@ resource "yandex_compute_instance" "vm-1" {
    	nat       = true
   	}
 
-  	metadata = {
-#   	ssh-keys = "centos:${file("/home/mpi_test/scripts/terraform/ssh3/id_rsa.pub")}"
-   	ssh-keys = "centos:${file("./key/id_rsa.pub")}"
-		user-data = "${file("./meta.txt")}"	
-		serial-port-enable=1
-  	}
-
+	# Significantly decrease VM's price for Yandex Cloud
    scheduling_policy {
    	preemptible = true
    }
 
+	# Add local user to sudoer
+  	metadata = {
+   	ssh-keys = "centos:${file("./key/id_rsa.pub")}"
+		user-data = "${file("./meta.txt")}"	
+		serial-port-enable=1
+  	}
 
   	provisioner "remote-exec" {
   		inline = ["sudo hostnamectl set-hostname gnomeCraft1"]
 #		on_failure = continue
 
 		connection {
-		   host        = yandex_compute_instance.vm-1.network_interface.0.nat_ip_address #coalesce(self.public_ip, self.private_ip)
+		   host        = yandex_compute_instance.vm-1.network_interface.0.nat_ip_address 	# coalesce(self.public_ip, self.private_ip)
 		   agent       = true
 		   type        = "ssh"
 		   user        = "test"
-#		   private_key = file("/home/mpi_test/scripts/terraform/ssh3/id_rsa")
 		   private_key = file("./key/id_rsa")
 		}
 	}
-
+	
+ 	provisioner "local-exec" {
+   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"host=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./just_check.yml"
+  	}
 }
 
 output "internal_ip_address_vm_1" {
