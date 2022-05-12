@@ -1,9 +1,9 @@
 - name: cliche_deploy
-  hosts: "{{ myhosts | default('web') }}"
+  hosts: "{{ hosts | default('SET_EXTERNAL_HOSTS_VARIABLE') }}"
 #  hosts: rocky85Cliche
-  remote_user: root
+#  remote_user: root
+  remote_user: test
 #sudo: True
-
   gather_facts: False
 
   vars:
@@ -24,27 +24,33 @@
     vEpel_repo_template: 'https://download.example'
     vEpel_repo_link:     'http://dl.fedoraproject.org'
 #    epel_repo_centos7:  http://dl.fedoraproject.org/pub/epel/7/$basearch
-  
-    vEpelRepoConfig:
-      - /etc/yum.repos.d/epel.repo
-      - /etc/yum.repos.d/epel-modular.repo
+
+    vReposPath:      /etc/yum.repos.d/
+    vEpelRepoConfig: epel*.repo
+#      - /etc/yum.repos.d/epel.repo
+#      - /etc/yum.repos.d/epel-modular.repo
+
     vOHPCRepoConfig:       /etc/yum.repos.d/OpenHPC.repo
 
     vInternal_ethIntf:  enp0s8
     vInternal_ethIP:    192.168.10.5
 
     vNTP_config_rocky8:  /etc/chrony.conf
-    vNTP_config_Cetnos7: /etc/ntp.conf
+    vNTP_config_Centos7: /etc/ntp.conf
 
     vNTP_service_rocky8_package:  chrony    
-    vNTP_service_Cetnos7_package: ntp
+    vNTP_service_Centos7_package: ntp
 
     vNTP_service_rocky8:  chronyd.service
-    vNTP_service_Cetnos7: ntpd.service
+    vNTP_service_Centos7: ntpd.service
 
     vDHCP_master_config:   /etc/dhcp/dhcpd.conf
     vDHCP_def_path:        /etc/dhcp/
- 
+
+# **************************************
+#  Prolog
+# **************************************
+
   pre_tasks:
     - name: Disclamer 
       ansible.builtin.debug:
@@ -58,13 +64,18 @@
         - "Master node can hand out PXE and system image."
         - "****************************************************************"
 
-    - name: Deploy ssh key # Can make smarter by checking before copy authorized_keys file but looks more complex for right now
-      copy: 
-        src:  ~/.ssh/ 
-        dest: ~/.ssh
-        mode: preserve
+#    - name: Deploy SSH key # Can make smarter by checking before copy authorized_keys file but looks more complex for right now
+#      copy: 
+##       src:  ~/.ssh/ 
+#        src:  ./key/
+##        dest: ~/.ssh
+#        dest: /tmp/
+#        mode: preserve
 
-    - name: Add to basrc convinient params. Will add only one times
+    - name: Add to basrc convinient params for root. Will add only one times
+      become: yes 
+      become_user: root
+      become_method: sudo
       lineinfile:
         path: ~/.bashrc
         line: "{{ item }}"
@@ -73,8 +84,24 @@
           - 'HISTFILESIZE=1000000 '
           - 'HISTSIZE=1000000'
 
+    - name: Add to basrc convinient params for user. Will add only one times
+      lineinfile:
+        path: ~/.bashrc
+        line: "{{ item }}"
+      with_items:
+          - 'HISTTIMEFORMAT="%d/%m/%y %T "'
+          - 'HISTFILESIZE=1000000 '
+          - 'HISTSIZE=1000000'
+
+# **************************************
+#  Main body
+# **************************************
+
   tasks:
    - name: Base tools deploy
+     become: yes 
+     become_user: root
+     become_method: sudo
      ansible.builtin.package:
       name: 
          - mc
@@ -93,80 +120,152 @@
          - tftp-server.x86_64 # by default TFTP don't installed on Rocky/Rhel 8 
       state: latest
 
-   - name: Disable firewall
-     service:
-       name:    firewalld.service
-       state:   stopped
-       enabled: false
-             
-   - name: Disable Selinux. Backup curr config. Just in case
-     shell: cp /etc/sysconfig/selinux /etc/sysconfig/selinux.`date -u +%s`
-
-   - name: Disable Selinux. Cnahge config
-     lineinfile:
-        path: /etc/sysconfig/selinux
-        regexp: "^SELINUX=enforcing"
-        line: "{{ item }}"
-     with_items:
-        - '#SELINUX=enforcing'
-        - 'SELINUX=disabled'   
-
-   - name: Which OS
-     shell: grep PRETTY_NAME /etc/os-release|sed "s/.*=\"//g"
-     register: result
-
-   - name: If it's Rocky based OS. Set variable
-     set_fact: 
-       vOHPC_release="{{ vOHPC_release_rocky85 }}"
-       vNTP_config="{{ vNTP_config_rocky8 }}"
-       vNTP_service="{{ vNTP_service_rocky8 }}"
-       vNTP_service_package="{{ vNTP_service_rocky8_package }}"
-
-     become: yes
-     when: result.stdout.split(' ')[0] == "Rocky"
-
-#   # Epel have problem that brake your yum repository process. 
-#   # To fix it on Centos you need to comment meta in 
-#   # /etc/yum.repos.d/epel.repo and uncomment basedir  
-#   - name: If it's CentOS|Rhel lower when 8
-#     shell: yum install -y http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
-#     become: yes
-#     when: result.stdout.split(' ')[0] == "Centos"
-
-         
-   - name: Prepare to OpenHPC  
-     shell: | 
-       yum install -y dnf-plugins-core
-       yum config-manager --set-enabled powertools
-
-
-     # To check replace seperatelly you can use follow method:
-     #    ansible-playbook -v --extra-vars "myhosts=rocky85Cliche"  clichePrepare.yml --tags "epilBase","epilMeta"
-   - name: Block to handle error with OpenHPC repo and EPIL repo
+   - name: Block to disable services
+     become: yes 
+     become_user: root
+     become_method: sudo
+     ignore_errors: true
      block: 
+        - name: Disable firewall
+          service:
+            name:    firewalld.service
+            state:   stopped
+            enabled: false
+                 
+        - name: Disable Selinux. Backup curr config. Just in case
+          shell: cp /etc/sysconfig/selinux /etc/sysconfig/selinux.`date -u +%s`
+
+        - name: Disable Selinux. Cnahge config
+          lineinfile:
+             path: /etc/sysconfig/selinux
+             regexp: "^SELINUX=enforcing"
+             line: "{{ item }}"
+          with_items:
+             - '#SELINUX=enforcing'
+             - 'SELINUX=disabled'   
+
+
+   # *********************************
+   # Find out which OS do we have
+   # *********************************
+   - name: Block which OS
+     tags: which_os
+     block:      
+       - name: Which OS
+         shell: grep PRETTY_NAME /etc/os-release|sed "s/.*=\"//g"
+         register: result
+       
+       - name: To show OS version response
+         debug: 
+           msg: 
+           -  Full line |{{ result.stdout_lines }}|
+           -  0 |{{ result.stdout.split(' ')[0] }}|
+           -  2 |{{ result.stdout.split(' ')[2] }}|
+
+
+          
+       - name: If it's Rocky based OS. Set variables
+         block: 
+           - name: Set variables for Rocky
+             set_fact: 
+               vOHPC_release="{{ vOHPC_release_rocky85 }}"
+               vNTP_config="{{ vNTP_config_rocky8 }}"
+               vNTP_service="{{ vNTP_service_rocky8 }}"
+               vNTP_service_package="{{ vNTP_service_rocky8_package }}"
+             become: yes
+
+           - debug:        
+               msg: "Rocky OS"
+
+           # Not included to tha main block because ...         
+           - name: Prepare to OpenHPC
+             become: yes 
+             become_user: root
+             become_method: sudo
+             shell: | 
+               yum install -y dnf-plugins-core
+               yum config-manager --set-enabled powertools
+
+         when: result.stdout.split(' ')[0] | lower == "rocky"
+
+
+       # Epel have problem that brake your yum repository process. 
+       # To fix it on Centos you need to comment meta in 
+       # /etc/yum.repos.d/epel.repo and uncomment basedir  
+       - name: If it's CentOS or Rhel bases and lower when 8. Set variables
+#        shell: yum install -y http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
+         block: 
+           - name: Set variables for Centos7
+             set_fact: 
+               vOHPC_release="{{ vOHPC_release_centos7 }}"
+               vNTP_config="{{ vNTP_config_Centos7 }}"
+               vNTP_service="{{ vNTP_service_Centos7 }}"
+               vNTP_service_package="{{ vNTP_service_Centos7_package }}"
+             become: yes
+
+           - debug:        
+               msg: "CentOS 7"
+
+         # Var "result" consider "CentOS Linux 7 (Core)"
+         when: ( result.stdout.split(' ')[0] | lower == "centos" ) and ( result.stdout.split(' ')[2] == "7" )
+
+   - name: To show configured variables
+     debug:        
+       msg: 
+       - "{{ vOHPC_release }}"
+       - "{{ vNTP_config }}"
+       - "{{ vNTP_service }}"
+       - "{{ vNTP_service_package }}"
+
+
+
+   # *********************************
+   # OpenHPC deploy
+   # *********************************
+     # To check replace seperatelly you can use follow method:
+     #    ansible-playbook -v --extra-vars "hosts=rocky85Cliche"  clichePrepare.yml --tags "epilBase","epilMeta"
+   - name: Block to handle error with OpenHPC repo and EPIL repo
+     become: yes 
+     become_user: root
+     become_method: sudo
+     tags: openhpc_deploy
+     block: 
+
        - name: Install OpenHPC repo
-         shell: yum install -y '{{ vOHPC_release }}'
-      
+         ansible.builtin.package:
+           name: "{{ vOHPC_release }}" 
+           state: latest
+#          shell: yum install -y '{{ vOHPC_release }}' # analog of above
+
+       - name: Lookup all epil repos
+         find:
+           path:     "{{ vReposPath }}"
+           patterns: "{{ vEpelRepoConfig }}"
+         register: epilRepos
+
+#       - debug:
+#           msg: "{{ epilRepos.path }}"
+   
        - name: Change EPIL. Change baseurl link
          tags: epilBase 
          replace:
 #            path: /etc/yum.repos.d/epel.repo
-            path: "{{ item }}"
+            path: "{{ item.path }}"
 
             regexp:  '#baseurl={{vEpel_repo_template}}'
             replace: 'baseurl={{ vEpel_repo_link }}'   
-         with_items: "{{ vEpelRepoConfig }}"
+         with_items: "{{ epilRepos.files }}"
 
        # To check without remove use : --skip-tags epilRemove
        - name: Change EPIL. Comment metalink
          tags: epilMeta
          replace:
 #           path: /etc/yum.repos.d/epel.repo
-            path: "{{ item }}"
+            path: "{{ item.path }}"
 
             regexp:  '^metalink='
             replace: '#metalink='
-         with_items: "{{ vEpelRepoConfig }}"
+         with_items: "{{ epilRepos.files }}"
 
        - name: Install OpenHPC base
          shell: |
@@ -179,9 +278,10 @@
      rescue:
        - name: ERROR handler Processing if have problem with EPIL repo install
          tags: epilRemove
-         shell: |
-           yum remove -y '{{ vOHPC_release }}'
-           yum remove -y epel-release
+         shell: echo "STUB STUB STUB"
+#         shell: |
+#           yum remove -y '{{ vOHPC_release }}'
+#           yum remove -y epel-release
 
        - name:
          ansible.builtin.debug:
@@ -189,7 +289,13 @@
 #     always:
 
 
+   # *********************************
+   # Provision stage
+   # ********************************* 
    - name: Enable Provisioning network interface
+     become: yes 
+     become_user: root
+     become_method: sudo
      block:
        - name: Add correct NTP to etc ntp.conf
          lineinfile:
@@ -236,6 +342,8 @@
 #     when: result.stdout.split(' ')[0] == "Rocky"
 
    - name: Configure mount points 
+     become_method: sudo
+     become_user: root
      tags: dhcpd_start
      lineinfile:
        path: "/etc/fstab"

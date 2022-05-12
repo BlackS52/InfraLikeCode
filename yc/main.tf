@@ -87,7 +87,8 @@ resource "yandex_compute_instance" "vm-1" {
 	}
 	
  	provisioner "local-exec" {
-   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"host=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./just_check.yml"
+#   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"host=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./just_check.yml"
+   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"hosts=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./clichePrepare.yml"
   	}
 }
 
