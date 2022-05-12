@@ -4,7 +4,7 @@
 #  remote_user: root
   remote_user: test
 #sudo: True
-  gather_facts: False
+  gather_facts: False   # Tangeble minimize run time 
 
   vars:
     vMaster_node:          192.168.10.10
@@ -20,10 +20,12 @@
     vOHPC_release_rocky85: http://repos.openhpc.community/OpenHPC/2/EL_8/x86_64/ohpc-release-2-1.el8.x86_64.rpm
     vOHPC_release_centos7: http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
 
-    #Full works link look like this: http://dl.fedoraproject.org/pub/epel/8/Everything/$basearch/
-    vEpel_repo_template: 'https://download.example'
+    #Full works link for rocky 8.5 looks like this: http://dl.fedoraproject.org/pub/epel/8/Everything/$basearch/
+    vEpel_repo_template_rocky85: 'https://download.example'     
+    #Full works link for centos 7  looks like this: http://dl.fedoraproject.org/pub/epel/7/$basearch
+    vEpel_repo_template_centos7: 'http://download.fedoraproject.org'
+    
     vEpel_repo_link:     'http://dl.fedoraproject.org'
-#    epel_repo_centos7:  http://dl.fedoraproject.org/pub/epel/7/$basearch
 
     vReposPath:      /etc/yum.repos.d/
     vEpelRepoConfig: epel*.repo
@@ -32,8 +34,8 @@
 
     vOHPCRepoConfig:       /etc/yum.repos.d/OpenHPC.repo
 
-    vInternal_ethIntf:  enp0s8
-    vInternal_ethIP:    192.168.10.5
+    vInternal_ethIntf:  enp0s8         # ansible_default_ipv4.interface
+    vInternal_ethIP:    192.168.10.5   # ToDo: select IP by OS type. For example CentOsS - one, Rocky - second and etc. 
 
     vNTP_config_rocky8:  /etc/chrony.conf
     vNTP_config_Centos7: /etc/ntp.conf
@@ -172,6 +174,7 @@
                vNTP_config="{{ vNTP_config_rocky8 }}"
                vNTP_service="{{ vNTP_service_rocky8 }}"
                vNTP_service_package="{{ vNTP_service_rocky8_package }}"
+               vEpel_repo_template="{{ vEpel_repo_template_rocky85 }}"
              become: yes
 
            - debug:        
@@ -201,6 +204,7 @@
                vNTP_config="{{ vNTP_config_Centos7 }}"
                vNTP_service="{{ vNTP_service_Centos7 }}"
                vNTP_service_package="{{ vNTP_service_Centos7_package }}"
+               vEpel_repo_template="{{ vEpel_repo_template_centos7 }}"
              become: yes
 
            - debug:        
@@ -216,7 +220,7 @@
        - "{{ vNTP_config }}"
        - "{{ vNTP_service }}"
        - "{{ vNTP_service_package }}"
-
+       - "{{ vEpel_repo_template }}"
 
 
    # *********************************
@@ -242,10 +246,7 @@
            path:     "{{ vReposPath }}"
            patterns: "{{ vEpelRepoConfig }}"
          register: epilRepos
-
-#       - debug:
-#           msg: "{{ epilRepos.path }}"
-   
+  
        - name: Change EPIL. Change baseurl link
          tags: epilBase 
          replace:
@@ -278,10 +279,10 @@
      rescue:
        - name: ERROR handler Processing if have problem with EPIL repo install
          tags: epilRemove
-         shell: echo "STUB STUB STUB"
-#         shell: |
-#           yum remove -y '{{ vOHPC_release }}'
-#           yum remove -y epel-release
+#         shell: echo "STUB STUB STUB"
+         shell: |
+           yum remove -y '{{ vOHPC_release }}'
+           yum remove -y epel-release
 
        - name:
          ansible.builtin.debug:
@@ -296,6 +297,7 @@
      become: yes 
      become_user: root
      become_method: sudo
+     tags: net_tune
      block:
        - name: Add correct NTP to etc ntp.conf
          lineinfile:
@@ -308,11 +310,19 @@
            name:    "{{ vNTP_service }}"
            state:   restarted
            enabled: true
+   
+       - name: Get current interface
+         # 2: enp0s8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP mode DEFAULT group default qlen 1000
+         shell: ip link show | grep ^[0-9]| grep -v lo| head -n 1| sed "s/\(.*\): \(.*\): \(.*\)/\2/g"
+         register: internalEthIntf
 
-       - name: Config eth interface
+       - name: Config virtual eth interface
          shell: |
-           perl -e "s/device = eth1/device = {{ vInternal_ethIntf }}/" /etc/warewulf/provision.conf
-           ifconfig "{{ vInternal_ethIntf }}" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
+           echo "{{ internalEthIntf }}"
+           perl -e "s/device = eth1/device = {{ internalEthIntf }}:0/" /etc/warewulf/provision.conf
+           ifconfig "{{ internalEthIntf }}:0" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
+
+#           ifconfig "{{ vInternal_ethIntf }}" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
 
 
 #   # TFTP don't need becuse the main purpose for this script to prepare image 
