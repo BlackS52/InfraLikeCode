@@ -1,21 +1,27 @@
 - name: cliche_deploy
   hosts: "{{ hosts | default('SET_EXTERNAL_HOSTS_VARIABLE') }}"
-#  hosts: rocky85Cliche
-#  remote_user: root
   remote_user: test
 #sudo: True
-  gather_facts: False   # Tangeble minimize run time 
+  gather_facts: False      # Tangible reduces execution time
 
   vars:
-    vMaster_node:          192.168.10.10
+    # Master node have DHCP, TFTP and need to boot another PXE nodes.  
+    # If want to set when set in teraform/ansible exec level
+    # Example: 
+    #    ip=51.250.103.230; ansible-playbook -i "$ip," -u test --private-key ./key/id_rsa --extra-vars "hosts=$ip vIsMasterNode=true" -v ./clichePrepare.yml
+    vIsMasterNode: "{{ isMasterNode | default(false) }}"
+    # Prepare RAM image from cliche
+    vMkImage: "{{ mkImage | default(false) }}"
+
+    vMaster_node:          192.168.10.10 # FIXME need to make this more flexible
     vHome_mount:           "{{vMaster_node}}:/home"
 #   vSLURM_master_config:  "{{vMaster_node}}:/etc/slurm/slurm.conf"
-    vSLURM_master_config:  "/etc/slurm/slurm.conf"
-
-    vSLURM_def_path:       /etc/slurm/       
+#   vSLURM_master_config:  "/etc/slurm/slurm.conf"
+    vSLURM_master_config:  ./stuff/etc/slurm/slurm.conf
+    vSLURM_def_path:       /etc/slurm/
 
     # In this dirr we should prepare and keep OpehHPC iamges
-    vCHROOT_base :         /opt/ohpc/admin/images/rocky8.5
+#    vCHROOT_base :         /opt/ohpc/admin/images/rocky8.5
 
     vOHPC_release_rocky85: http://repos.openhpc.community/OpenHPC/2/EL_8/x86_64/ohpc-release-2-1.el8.x86_64.rpm
     vOHPC_release_centos7: http://build.openhpc.community/OpenHPC:/1.3/CentOS_7/x86_64/ohpc-release-1.3-1.el7.x86_64.rpm
@@ -34,7 +40,7 @@
 
     vOHPCRepoConfig:       /etc/yum.repos.d/OpenHPC.repo
 
-    vInternal_ethIntf:  enp0s8         # ansible_default_ipv4.interface
+    vInternal_ethIP_Master:  192.168.10.10
     vInternal_ethIP:    192.168.10.5   # ToDo: select IP by OS type. For example CentOsS - one, Rocky - second and etc. 
 
     vNTP_config_rocky8:  /etc/chrony.conf
@@ -46,7 +52,7 @@
     vNTP_service_rocky8:  chronyd.service
     vNTP_service_Centos7: ntpd.service
 
-    vDHCP_master_config:   /etc/dhcp/dhcpd.conf
+    vDHCP_master_config:   ./stuff/etc/dhcp/dhcpd.conf
     vDHCP_def_path:        /etc/dhcp/
 
 # **************************************
@@ -155,14 +161,14 @@
      block:      
        - name: Which OS
          shell: grep PRETTY_NAME /etc/os-release|sed "s/.*=\"//g"
-         register: result
+         register: whichOS_result
        
        - name: To show OS version response
          debug: 
            msg: 
-           -  Full line |{{ result.stdout_lines }}|
-           -  0 |{{ result.stdout.split(' ')[0] }}|
-           -  2 |{{ result.stdout.split(' ')[2] }}|
+           -  Full line |{{ whichOS_result.stdout_lines }}|
+           -  0 |{{ whichOS_result.stdout.split(' ')[0] }}|
+           -  2 |{{ whichOS_result.stdout.split(' ')[2] }}|
 
 
           
@@ -175,6 +181,7 @@
                vNTP_service="{{ vNTP_service_rocky8 }}"
                vNTP_service_package="{{ vNTP_service_rocky8_package }}"
                vEpel_repo_template="{{ vEpel_repo_template_rocky85 }}"
+               vDistr=rocky8
              become: yes
 
            - debug:        
@@ -189,7 +196,7 @@
                yum install -y dnf-plugins-core
                yum config-manager --set-enabled powertools
 
-         when: result.stdout.split(' ')[0] | lower == "rocky"
+         when: whichOS_result.stdout.split(' ')[0] | lower == "rocky"
 
 
        # Epel have problem that brake your yum repository process. 
@@ -205,13 +212,14 @@
                vNTP_service="{{ vNTP_service_Centos7 }}"
                vNTP_service_package="{{ vNTP_service_Centos7_package }}"
                vEpel_repo_template="{{ vEpel_repo_template_centos7 }}"
+               vDistr=centos7
              become: yes
 
            - debug:        
                msg: "CentOS 7"
 
          # Var "result" consider "CentOS Linux 7 (Core)"
-         when: ( result.stdout.split(' ')[0] | lower == "centos" ) and ( result.stdout.split(' ')[2] == "7" )
+         when: ( whichOS_result.stdout.split(' ')[0] | lower == "centos" ) and ( whichOS_result.stdout.split(' ')[2] == "7" )
 
    - name: To show configured variables
      debug:        
@@ -242,6 +250,7 @@
 #          shell: yum install -y '{{ vOHPC_release }}' # analog of above
 
        - name: Lookup all epil repos
+         tags: epilFind
          find:
            path:     "{{ vReposPath }}"
            patterns: "{{ vEpelRepoConfig }}"
@@ -291,7 +300,7 @@
 
 
    # *********************************
-   # Provision stage
+   # Tune instance
    # ********************************* 
    - name: Enable Provisioning network interface
      become: yes 
@@ -313,151 +322,228 @@
    
        - name: Get current interface
          # 2: enp0s8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP mode DEFAULT group default qlen 1000
-         shell: ip link show | grep ^[0-9]| grep -v lo| head -n 1| sed "s/\(.*\): \(.*\): \(.*\)/\2/g"
+         shell: |
+            ip link show | grep ^[1-9]| grep -v lo| head -n 1| sed "s/\(.*\): \(.*\): \(.*\)/\2/g"
          register: internalEthIntf
 
        - name: Config virtual eth interface
          shell: |
-           echo "{{ internalEthIntf }}"
-           perl -e "s/device = eth1/device = {{ internalEthIntf }}:0/" /etc/warewulf/provision.conf
-           ifconfig "{{ internalEthIntf }}:0" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
-
-#           ifconfig "{{ vInternal_ethIntf }}" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
+           ifconfig "{{ internalEthIntf.stdout }}:0" "{{ vInternal_ethIP }}" netmask 255.255.255.0 up
+           sed -i "s/device = eth1/device = {{ internalEthIntf.stdout }}:0/" /etc/warewulf/provision.conf
 
 
-#   # TFTP don't need becuse the main purpose for this script to prepare image 
-#   # and put it to share. DHCP and TFTP located on another node - master node.
-#
-#   - name: Configure and up TFTP for entos Rhel lower 8 
-#     block: 
-#       - name: If Centos Rhel lower 8 then Up TFTP 
-#         shell: |
-#           perl -pi -e "s/^\s+disable\s+= yes/ disable = no/" /etc/xinetd.d/tftp
-#           perl -pi -e "s/^\s+disable\s+= yes/ disable = no/" /etc/xinetd.d/tftp
-#
-#       - name: If Centos Rhel lower 8 then Restart xinitd 
-#         service:
-#           name:    xinetd.service
-#           state:   restarted
-#           enabled: true          
-#     when: result.stdout.split(' ')[0] == "Centos"
-#
-#   - name: Configure and up TFTP for Centos Rhel Rocky equal or higher 8
-#     block:
-#       - name: If Centos Rhel Rocky equal or higher 8 then Up TFTP
-#         service:
-#           name:    tftp.service
-#           state:   restarted
-#           enabled: true
-#     when: result.stdout.split(' ')[0] == "Rocky"
+       - name: MasterNode Processing
+         tags: masterNode_processing
+         block:
+           - name: Debug MasterNode flag
+             debug:        
+               msg: 
+               - "vIsMasterNode {{ vIsMasterNode }}"
+               - "whichOS_result.stdout {{ whichOS_result.stdout }}" 
 
-   - name: Configure mount points 
-     become_method: sudo
+           # If it's a MasterNode then:
+           #    to up TFTP, DHCP and NFS server 
+           - name: If vIsMasterNode true
+             block:
+
+               - name: Set IP addr. If it's master then set Master IP
+                 set_fact: 
+                   vInternal_ethIP="{{ vInternal_ethIP_Master }}"
+                 become: yes
+
+               - name: If Centos 7
+                 block:
+                   - name: vIsMasterNode true and it is Centos 7
+                     debug:        
+                       msg: "CentOS 7 and vIsMasterNode true"
+
+                   - name: If Centos Rhel lower 8 then to up TFTP 
+                     shell: |
+                       sed -i "s/^\s+disable\s+= yes/ disable = no/" /etc/xinetd.d/tftp
+
+                   - name: If Centos or Rhel lower 8 then Restart xinitd 
+                     service:
+                       name:    xinetd.service
+                       state:   restarted
+                       enabled: true          
+                 when: ( whichOS_result.stdout.split(' ')[0] | lower == "centos" ) and ( whichOS_result.stdout.split(' ')[2] == "7" )
+
+               # FIXME need to check
+               - name: If Rocky
+                 block:
+                   - name: vIsMasterNode true and it is Rocky
+                     debug:        
+                       msg: "Rocky and vIsMasterNode true"
+
+                   - name: If Rocky then Up TFTP FIXME
+                     service:
+                       name:    tftp.service
+                       state:   restarted
+                       enabled: true
+                 when: ( whichOS_result.stdout.split(' ')[0] | lower == "rocky" )
+
+               - name: If it is Master Node then Share mount points 
+                 tags: nfs_tune
+                 lineinfile:
+                   path: "/etc/exports"
+                   line: "{{ item }}"
+                 with_items:
+                   - /home *(rw,no_subtree_check,fsid=10,no_root_squash)
+                   - /opt/ohpc/pub *(ro,no_subtree_check,fsid=11)
+                   - /var/lib/tftpboot/warewulf *(rw,no_subtree_check,fsid=12,no_root_squash)
+                   - /opt/ohpc/admin/images *(rw,no_subtree_check,fsid=13)
+         
+               - name: Restart NFS
+                 tags: nfs_tune
+                 service:
+                   name:    nfs-server.service
+                   state:   reloaded
+                   enabled: true          
+
+               - name: NFS state
+                 tags: nfs_tune
+                 shell: exportfs
+
+        #       Not sure that it needs. Looks like it should be configured automatically by OpenHPC
+        #       - name: Copy DHCP config from master node
+        #         tags: dhcpd_start
+        #         copy: 
+        #            src:  "{{ vDHCP_master_config }}"
+        #            dest: "{{ vDHCP_def_path }}"
+        #            mode: preserve
+               
+             when: (vIsMasterNode == "true") 
+
+
+           # If it's not a MasterNode then:
+           #    TFTP don't need becuse the main purpose for this script to 
+           #    prepare image and put it to share. 
+           #    DHCP and TFTP located on another node - master node.   
+           - name: If vIsMasterNode false
+             block:
+               - name: Configure mount points 
+                 lineinfile:
+                   path: "/etc/fstab"
+                   line: "{{ item }}"
+                 with_items:
+                   - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
+                   - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"
+                   - "{{ vMaster_node }}:/var/lib/tftpboot/warewulf /var/lib/tftpboot/warewulf *(rw,no_subtree_check,no_root_squash)"
+                   - "{{ vMaster_node }}:/opt/ohpc/admin/images     /opt/ohpc/admin/images     *(rw,no_subtree_check,no_root_squash)"
+
+               - name: Mount all from fstab 
+                 shell: mount -a
+
+               - name: Drow attention Cliche usage
+                 ansible.builtin.debug:
+                   msg:
+                     - We don't need to up DHCP and PXE on this cliche node. 
+                     - In this node we need just to build image. Not more.
+                     - A initramfs and OS built images should be placed to NFS mounts.
+                     - DHCP and PXE works on the Master node and can image from this cliche.
+             when: (vIsMasterNode == "false") 
+
+
+   # *********************************
+   # Deploy SLURM and frendly services
+   # ********************************* 
+   - name: Deploy SLURM and frendly services
+     become: yes 
      become_user: root
-     tags: dhcpd_start
-     lineinfile:
-       path: "/etc/fstab"
-       line: "{{ item }}"
-     with_items:
-       - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
-       - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"
-       - "{{ vMaster_node }}:/var/lib/tftpboot/warewulf /var/lib/tftpboot/warewulf *(rw,no_subtree_check,no_root_squash)"
-       - "{{ vMaster_node }}:/opt/ohpc/admin/images     /opt/ohpc/admin/images     *(rw,no_subtree_check,no_root_squash)"
+     become_method: sudo
+     tags: slurm_deploy
+     block:
+       - name: Configure and up SLURM   
+         block:  
+           - name: Install ohpc slurm server
+             shell: yum install -y ohpc-slurm-server
+           
+           - name: Copy SLURM config from master node
+             copy: 
+                src:  "{{ vSLURM_master_config }}"
+                dest: "{{ vSLURM_def_path }}"
+                mode: preserve
 
-   - name: Mount all from fstab 
-     tags: dhcpd_start
-     shell: mount -a
+           - name: Up MariaDB
+             service:
+               name:    mariadb.service
+               state:   restarted
+               enabled: true
+            
+           - name: Up HTTPd
+             service:
+               name:    httpd.service
+               state:   restarted
+               enabled: true
+
+   - name: Make image if requested
+     tags: mkImage
+     block: 
+       - block:
+          - name: Make RAM image based on Centos 7
+            include: mkImg_Centos7.yml 
+            vars:
+               vEpilRepos: "{{ epilRepos }}"
+               vCHROOT_baseL: /opt/ohpc/admin/images/ 
+               vOHPCRepoConfigL: "{{ vOHPCRepoConfig }}"
+               vNTP_service_packageL: "{{ vNTP_service_package }}"
+         when: ( vDistr == "centos7" )
+
+#       - name: Make RAM image based on Rocky 8
+#         import_playbook: mkImg_Rocky8.yml vEpilRepos="{{ epilRepos.files}}" vCHROOT_baseL=/opt/ohpc//opt/ohpc/admin/images/ vOHPCRepoConfigL={{ vOHPCRepoConfig }} vNTP_service_packageL={{ vNTP_service_package }}
+#         when: ( vDistr == rocky8 )
+     when: (vMkImage == "true")
+
+#   # ****************************************
+#   #  Second part
+#   # ****************************************
+#   - name: Prepare first OpenHPC image build
+#     block:    
+#
+#       - name: Init base image
+#         shell: |
+#           wwinit database
+#           wwmkchroot rocky-8 "{{ vCHROOT_base }}"    # Build initial chroot image. NOTICE: rocky-8 is a template name /usr/libexec/warewulf/wwmkchroot/rocky-8.tmpl
+#
+#       - name: Copy EPEL repos
+#         shell: |
+#            cp "{{ item }}" "{{vCHROOT_base}}/{{ item }}"
+#         with_items: "{{ vEpelRepoConfig }}"
+#
+#       - name: Copy OpenHPC repo
+#         shell: |
+#            cp "{{ vOHPCRepoConfig }}" "{{vCHROOT_base}}/{{ vOHPCRepoConfig }}"
+#
+#       - name: Install base OpenHPC components
+#         tags: OpenHPC_image_baseInstall
+#         shell: |
+#           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-base-compute 
+#
+#       - name: Install base OpenHPC components
+#         shell: |      
+#           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-slurm-client
+#           yum -y --installroot="{{ vCHROOT_base }}" install "{{ vNTP_service_package}}"
+#           yum -y --installroot="{{ vCHROOT_base }}" install kernel 
+#           yum -y --installroot="{{ vCHROOT_base }}" install lmod-ohpc
+#
+#       - name: Image prepare
+#         shell: | 
+#           wwbootstrap `uname -r`
+#           wwvnfs -y --chroot="{{ vCHROOT_base }}"
+#
+#       - name: Configure mount points in a image
+#         lineinfile:
+#           path: "{{ vCHROOT_base }}/etc/fstab"
+#           line: "{{ item }}"
+#         with_items:
+#           - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
+#           - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"         
+#
+#       - name:  Copy resolv.conf to a new image
+#         shell: cp -p /etc/resolv.conf "{{ vCHROOT_base }}"/etc/resolv.conf
 
 
-   - name: Configure and up SLURM   
-     block:  
-       - name: Install ohpc slurm server
-         shell: yum install -y ohpc-slurm-server
        
-       - name: Copy SLURM config from master node
-         copy: 
-            src:  "{{ vSLURM_master_config }}"
-            dest: "{{ vSLURM_def_path }}"
-            mode: preserve
-
-
-   - name: Up MariaDB
-     service:
-       name:    mariadb.service
-       state:   restarted
-       enabled: true
-    
-   - name: Up HTTPd
-     service:
-       name:    httpd.service
-       state:   restarted
-       enabled: true
-
-
-   # ****************************************
-   #  Second part
-   # ****************************************
-   - name: Prepoare first OpenHPC image build
-     block:    
-
-       - name: Init base image
-         shell: |
-           wwinit database
-           wwmkchroot rocky-8 "{{ vCHROOT_base }}"    # Build initial chroot image. NOTICE: rocky-8 is a template name /usr/libexec/warewulf/wwmkchroot/rocky-8.tmpl
-
-       - name: Copy EPEL repos
-         shell: |
-            cp "{{ item }}" "{{vCHROOT_base}}/{{ item }}"
-         with_items: "{{ vEpelRepoConfig }}"
-
-       - name: Copy OpenHPC repo
-         shell: |
-            cp "{{ vOHPCRepoConfig }}" "{{vCHROOT_base}}/{{ vOHPCRepoConfig }}"
-
-       - name: Install base OpenHPC components
-         tags: OpenHPC_image_baseInstall
-         shell: |
-           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-base-compute 
-
-       - name: Install base OpenHPC components
-         shell: |      
-           yum -y --installroot="{{ vCHROOT_base }}" install ohpc-slurm-client
-           yum -y --installroot="{{ vCHROOT_base }}" install "{{ vNTP_service_package}}"
-           yum -y --installroot="{{ vCHROOT_base }}" install kernel 
-           yum -y --installroot="{{ vCHROOT_base }}" install lmod-ohpc
-
-       - name: Image prepare
-         shell: | 
-           wwbootstrap `uname -r`
-           wwvnfs -y --chroot="{{ vCHROOT_base }}"
-
-       - name: Configure mount points in a image
-         lineinfile:
-           path: "{{ vCHROOT_base }}/etc/fstab"
-           line: "{{ item }}"
-         with_items:
-           - "{{ vMaster_node }}:/home /home nfs nfsvers=3,rsize=24,wsize=1024,cto 0 0"
-           - "{{ vMaster_node }}:/opt/ohpc/pub /opt/ohpc/pub nfs nfsvers=3 0 0"         
-
-       - name:  Copy resolv.conf to a new image
-         shell: cp -p /etc/resolv.conf "{{ vCHROOT_base }}"/etc/resolv.conf
-
-
-       
-   - name: Copy DHCP config from master node
-     tags: dhcpd_start
-     copy: 
-        src:  "{{ vDHCP_master_config }}"
-        dest: "{{ vDHCP_def_path }}"
-        mode: preserve
-
-   - name: Drow attention Cliche usage
-     ansible.builtin.debug:
-       msg:
-         - We don't need to up DHCP and PXE on this cliche node. 
-         - In this node we need just to build image. Not more.
-         - A initramfs and OS built images are placed to NFS mounts.
-         - DHCP and PXE works on the master node and can use that share.
                      
    # Make it on the latest stage because we need to configure DHPCP.conf by OpenHPC. So shift it to the last. 
 #   - name: Up DHCPd

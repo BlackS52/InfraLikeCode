@@ -20,6 +20,26 @@ provider "yandex" {
     zone = "ru-central1-b"
 }
 
+
+# ***********************************************
+#	Init variables
+# ***********************************************
+
+variable "isMasterNode" {
+  	type      = bool
+	default 	 = false
+  	sensitive = false
+	description = "Master node have DHCP, TFTP and need to boot another PXE nodes. If isMaster=true then deploy these services. Default state - false."
+}
+
+variable "isMakeImage" {
+  	type      = bool
+	default 	 = false
+  	sensitive = false
+	description = "Do you want to make an image? Default state - false."
+}
+
+
 # ***********************************************
 #	Main part
 # ***********************************************
@@ -74,6 +94,9 @@ resource "yandex_compute_instance" "vm-1" {
   	}
 
   	provisioner "remote-exec" {
+#		tags = { 
+#	     Name = "remote-exec"
+#		}
   		inline = ["sudo hostnamectl set-hostname gnomeCraft1"]
 #		on_failure = continue
 
@@ -88,7 +111,7 @@ resource "yandex_compute_instance" "vm-1" {
 	
  	provisioner "local-exec" {
 #   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"host=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./just_check.yml"
-   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"hosts=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address}\" ./clichePrepare.yml"
+   	command = "ansible-playbook -i '${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address},' -u test --private-key ./key/id_rsa --extra-vars \"hosts=${yandex_compute_instance.vm-1.network_interface.0.nat_ip_address} isMasterNode=${var.isMasterNode} isMakeImage=${var.isMakeImage}\" ./clichePrepare.yml"
   	}
 }
 
