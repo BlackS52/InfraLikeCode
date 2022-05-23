@@ -5,13 +5,18 @@
   gather_facts: False      # Tangible reduces execution time
 
   vars:
+    vAccess_key: "{{ access_key }}"
+    vSecret_key: "{{ secret_key }}"
+#    vAccess_key: "{{ access_key | default('NULL') }}"
+#    vSecret_key: "{{ secret_key | default('NULL' }}"
+   
     # Master node have DHCP, TFTP and need to boot another PXE nodes.  
     # If want to set when set in teraform/ansible exec level
     # Example: 
     #    ip=51.250.103.230; ansible-playbook -i "$ip," -u test --private-key ./key/id_rsa --extra-vars "hosts=$ip vIsMasterNode=true" -v ./clichePrepare.yml
     vIsMasterNode: "{{ isMasterNode | default(false) }}"
     # Prepare RAM image from cliche
-    vMkImage: "{{ mkImage | default(false) }}"
+    vMkImage: "{{ isMakeImage | default(false) }}"
 
     vMaster_node:          192.168.10.10 # FIXME need to make this more flexible
     vHome_mount:           "{{vMaster_node}}:/home"
@@ -126,6 +131,7 @@
          - curl
          - chrony       # ntpd for Rocky/Rhel 8 and higher
          - tftp-server.x86_64 # by default TFTP don't installed on Rocky/Rhel 8 
+         - unzip
       state: latest
 
    - name: Block to disable services
@@ -443,6 +449,13 @@
                      - DHCP and PXE works on the Master node and can image from this cliche.
              when: (vIsMasterNode == "false") 
 
+   - name: Export static key credentials to enviroment
+     tags: env_export
+     shell: |
+       export AWS_ACCESS_KEY_ID="{{ vAccess_key }}"
+       export AWS_SECRET_ACCESS_KEY="{{ vSecret_key }}"
+       echo $AWS_ACCESS_KEY_ID > /tmp/access_key
+       echo $AWS_SECRET_ACCESS_KEY > /tmp/secret_key
 
    # *********************************
    # Deploy SLURM and frendly services
